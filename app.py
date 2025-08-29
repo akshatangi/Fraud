@@ -1,58 +1,64 @@
 from flask import Flask, request, jsonify
-from flask_jwt_extended import JWTManager, jwt_required, create_access_token
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from pydantic import BaseModel, ValidationError
 import joblib
-import pandas as pd
 import numpy as np
 import logging
-import time
 
 app = Flask(__name__)
-app.config['JWT_SECRET_KEY'] = 'your-secure-secret-key'  # Change this in production!
-
+app.config["JWT_SECRET_KEY"] = "super-secret"
 jwt = JWTManager(app)
 
-# Load trained model
+# Rate Limiting (5 requests/minute per IP)
+limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["5 per minute"])
+
+# Load model
 model = joblib.load("fraud_model.pkl")
 
-# Set up logging
-logging.basicConfig(filename='fraud_detection.log', level=logging.INFO, format='%(asctime)s %(message)s')
+# Logging setup
+logging.basicConfig(filename="fraud_detection.log", level=logging.INFO)
 
-@app.route('/login', methods=['POST'])
+# Input schema
+class Transaction(BaseModel):
+    amount: float
+    device: str
+    location: str
+    hour: int
+
+# Dummy login
+@app.route("/login", methods=["POST"])
 def login():
-    username = request.json.get("username", None)
-    password = request.json.get("password", None)
-    if username != "admin" or password != "password":
-        return jsonify({"msg": "Bad credentials"}), 401
-    access_token = create_access_token(identity=username)
-    return jsonify(access_token=access_token), 200
+    creds = request.get_json()
+    if creds["username"] == "admin" and creds["password"] == "password":
+        token = create_access_token(identity=creds["username"])
+        return jsonify(access_token=token), 200
+    return jsonify({"msg": "Invalid credentials"}), 401
 
-@app.route('/predict', methods=['POST'])
+# Predict
+@app.route("/predict", methods=["POST"])
 @jwt_required()
+@limiter.limit("5 per minute")
 def predict():
     try:
         data = request.get_json()
-        df = pd.DataFrame([data])
-        start_time = time.time()
-        proba = model.predict_proba(df)[0][1]
-        prediction = int(proba > 0.3)
-        latency = round((time.time() - start_time) * 1000, 2)  # ms
+        txn = Transaction(**data)
+        input_vector = np.array([[txn.amount, txn.device == "mobile", txn.location == "Delhi", txn.hour]])
+        prob = model.predict_proba(input_vector)[0][1]
+        prediction = int(prob > 0.5)
 
-        log_data = {
-            "input": data,
-            "prediction": prediction,
-            "probability": proba,
-            "latency_ms": latency
-        }
-        logging.info(log_data)
+        # Log
+        logging.info(f"Prediction: {prediction}, Confidence: {prob:.4f}")
 
         return jsonify({
             "prediction": prediction,
-            "fraud_probability": round(proba, 4),
-            "latency_ms": latency
+            "confidence": round(prob, 4)
         })
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
     except Exception as e:
-        logging.error(f"Prediction error: {str(e)}")
-        return jsonify({"error": "Invalid input or server error"}), 500
+        return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(debug=True)
