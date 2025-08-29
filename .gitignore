@@ -8,6 +8,7 @@ __pycache__/
 # Ignore model files
 *.pkl
 *.joblib
+*.log
 
 # Ignore system files
 .DS_Store
